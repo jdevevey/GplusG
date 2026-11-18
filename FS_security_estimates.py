@@ -1,5 +1,6 @@
-from aux.MSIS_security import MSIS_summarize_attacks, MSISParameterSet
-from aux.MLWE_security import MLWE_summarize_attacks, MLWEParameterSet
+from auxiliary.MSIS_security import MSIS_summarize_attacks, MSISParameterSet
+from auxiliary.MLWE_security import MLWE_summarize_attacks, MLWEParameterSet
+from auxiliary.entropy import entropy, high_bits, trunc_gaussian
 from math import sqrt, log, pi, floor, ceil
 from scipy.special import betaincinv, gammaln
 import sys
@@ -27,7 +28,7 @@ if "--no-size" in sys.argv:
 if "--fast_LWE" in sys.argv or "-f" in sys.argv:
     fast_LWE = True
 if len(sys.argv)<=1 or "--help" in sys.argv:
-    print("Security Estimator for HAETAE signature.\nOPTIONS:\n--record_xxx: Adds the record parameter sets for xxx security (xxx can be 120, 180 or 260) to the list of parameters.\n--param=\"n=256 q=122889 k=2 l=2 eta=3 security=120 adapt=1\": adds the following parameter set to the list. Multiple parameter sets can be input this way. security must be 120, 180 or 260. If adapt is set to 1, k, l and eta may be increased until target security is reached.\n--no-weak_uf: skips the weak unforgeability hardness computation.\n--no-strong_uf: skips the strong unforgeability hardness computation.\n--no-key_recovery: skips the key recovery hardness computation.\n--no-size: skips the expected verification key and signature sizes computation.\n--fast_LWE or -f: skips the dual attack for LWE parameters. Makes the script a lot faster. Note that this may overestimate the LWE cost by a few bits.")
+    print("Security Estimator for G+G.\nOPTIONS:\n--xxx: Adds the parameter set for xxx security (xxx can be 120, 180 or 260) to the list of parameters.\n--no-weak_uf: skips the weak unforgeability hardness computation.\n--no-strong_uf: skips the strong unforgeability hardness computation.\n--no-key_recovery: skips the key recovery hardness computation.\n--no-size: skips the expected verification key and signature sizes computation.\n--fast_LWE or -f: skips the dual attack for LWE parameters. Makes the script a lot faster. Note that this may overestimate the LWE cost by a few bits.")
     exit()
 
 ###########################################################################
@@ -35,16 +36,15 @@ if len(sys.argv)<=1 or "--help" in sys.argv:
 ###########################################################################
 
 
-#This defines, for each security level, the necessary entropy in the hash function.
-#I have yet to understand why it is this way.
-entropy = { 120 : 192, 180 : 225, 260 : 257 }
+#entropy = { 120 : 192, 180 : 225, 260 : 257 }
 
 
 class FSParameterSet(object):
-    def __init__(self, q, n=256, k=1, l=1, sigma=0, eta=5, security=120, alpha = 256, d=0):
+    def __init__(self, q, n=256, k=1, l=1, sigma1=0, eta=5, security=120, alpha = 256, d=0,zeta="2"):
         """
         This class represents a parameter set for the signature.
         """
+        self.security = security
         #Ring dimension and modulus
         self.n   = n
         self.q   = q
@@ -55,8 +55,12 @@ class FSParameterSet(object):
 
         #SIS parameters
         self.k = k
-
-        self.sigma = sigma
+        #Rounding up to two decimals -> make sure the inequalities from the paper are satisfied
+        self.s = ceil(100*sqrt(2*log(n-1+n*2**65)/pi) )/100
+        self.sigma_pi = ceil(100 * sigma1*self.s*sqrt(2))/100 #gaussian parameter with paper convention
+        #self.sigma_pi = ceil(100 * sigma1*self.s)/100 #gaussian parameter with paper convention
+        self.sigma = self.sigma_pi/sqrt(2*pi) #standard deviation
+        self.sigma1 = sigma1
 
         self.delta = log(self.sigma,2)
         self.d = d
@@ -65,73 +69,36 @@ class FSParameterSet(object):
         self.gamma2 = 2*(self.q-1)/self.alpha
 
         # SIS ell_2 bound for unforgeability, using selftargetMSIS
-        self.zeta = self.B
+        self.zeta = ceil(100*self.B)/100
         # SIS ell_2 bound for strong unforgeability
         self.zeta_prime = 2*self.B
         if(self.zeta>self.q):
             print("Warning: B > q, which may lead to improved attacks")
 
+        self.zeta_lattice = zeta
+
 
 
 # Schemes parameters
 ####################
-# Lowest values for q -> 6657, 5633, 3585, 2561, 1537, 1025.
 n= 256
 
 params  = []
 
 #Parse input parameters
-for s in sys.argv:
-    if s[:len("--param=")] == "--param=":
-        args = s[len("--param="):].split(' ') #Remove the beginning and final "
-        print("Currently parsing",args,"\n")
-        values = {"q" : "6657", "n" : "256", "k" : "1", "l" : "1", "security" : "120", "eta" : "2"}
-        for opt in args:
-            values[opt.split("=")[0]] = opt.split("=")[1]
-        params += [("Fiat-Shamir Signature "+str(s), FSParameterSet(int(values["q"]), int(values["n"]), k=int(values["k"]), l=int(values["l"]), eta=int(values["eta"]), security=int(values["security"])))]
+if "--120" in sys.argv:
+    params += [("G+G Signature Medium", FSParameterSet(64513, n=256, k=2, l=4, eta=1, security = 120, sigma1 = 72.98, alpha = 512, d=1, zeta="1+x^{n/2}"))]
+if "--180" in sys.argv:
+    params += [("G+G Signature Recommended", FSParameterSet(114689, n, k=3, l=6, eta=1, security = 180, sigma1 = 123.93, alpha = 512, d = 1, zeta="2"))] #0.25
+if "--260" in sys.argv:
+    params += [("G+G Signature Very High", FSParameterSet(64513, n, k=4, l=7, eta=1, security=260, sigma1 = 110.10 , alpha = 512, d=0, zeta="2"))] #0.1
 
 
-
-#Hardcoded parameters.
-q_val = [64513, 95233, 125441, 202753]
-#Precomputed values for sigma, with key acceptance rates of 0.1, 0.25 and 0.5
-#Inputs are k, l and d
-sigma_dict  = {
-(2,4,0): {0.1: 488.99, 0.25: 505.06, 0.5: 523.41},
-(2,4,1): {0.1: 566.98, 0.25: 584.64, 0.5: 611.60},
-(3,4,0): {0.1: 519.51, 0.25: 535.14, 0.5: 556.05},
-(3,4,1): {0.1: 616.13, 0.25: 637.28, 0.5: 664.18},
-(3,5,0): {0.1: 546.25, 0.25: 563.38, 0.5: 584.00},
-(3,5,1): {0.1: 641.42, 0.25: 658.51, 0.5: 683.16},
-(3,6,0): {0.1: 578.43, 0.25: 594.47, 0.5: 611.63},
-(3,6,1): {0.1: 661.18, 0.25: 680.86, 0.5: 704.98},
-(4,5,0): {0.1: 579.17, 0.25: 592.24, 0.5: 610.88},
-(4,5,1): {0.1: 681.58, 0.25: 700.22, 0.5: 727.68},
-(4,7,0): {0.1: 625.55, 0.25: 640.14, 0.5: 658.89},
-(4,7,1): {0.1: 724.16, 0.25: 742.45, 0.5: 767.40}}
-dict_512 = {
-(1,1,0): {0.1: 804.94, 0.25: 840.82, 0.5: 894.77},
-(1,1,1): {0.1: 889.63, 0.25: 934.05, 0.5: 994.24}}
-dict_1024 = {0.1: 703.11, 0.25: 727.96, 0.5: 767.76}
-
-if "--record_120" in sys.argv:
-    #Old parameter
-    #params += [("G+G Signature Medium", FSParameterSet(95233, n=256, k=2, l=4, eta=1, security = 120, sigma = sqrt(2)*234.7, alpha = 128))]
-    params += [("G+G Signature Medium", FSParameterSet(64513, n=256, k=3, l=4, eta=1, security = 120, sigma = sigma_dict[3,4,1][0.5], alpha = 512, d=1))]
-    #params += [("G+G Signature Medium", FSParameterSet(64513, n=256, k=3, l=4, eta=1, security = 120, sigma = sigma_dict[3,4,0][0.5], alpha = 512, d=0))]
-if "--record_180" in sys.argv:
-    #params += [("G+G Signature Recommended", FSParameterSet(50177, n, k=4, l=5, eta=1, security = 180, sigma = sigma_dict[3,6,0][0.5], alpha = 512, d = 0))]
-    params += [("G+G Signature Recommended", FSParameterSet(50177, n, k=4, l=5, eta=1, security = 180, sigma = sigma_dict[4,5,1][0.5], alpha = 512, d = 1))]
-    #params += [("G+G Signature Recommended", FSParameterSet(202753, n, k=3, l=6, eta=1, security = 180, sigma = sigma_dict[3,6,0][0.5], alpha = 512, d = 0))]
-if "--record_260" in sys.argv:
-    params += [("G+G Signature Very High", FSParameterSet(202753, n, k=4, l=7, eta=1, security=260, sigma = sigma_dict[4,7,0][0.25], alpha = 512, d=0))]
-if "--record_512_ntru" in sys.argv:
-    #params += [("G+G NTRU Signature Medium", FSParameterSet(32257, n=512, k=1, l=1, eta=5, security = 120, sigma = sqrt(2)*991, alpha = 256))]
-    #params += [("G+G NTRU Signature Medium", FSParameterSet(40961, n=512, k=1, l=1, eta=2, security = 120, sigma = dict_512[1,1,0][0.1], alpha = 256))]
-    params += [("G+G NTRU Signature Medium", FSParameterSet(32257, n=512, k=1, l=1, eta=2, security = 120, sigma = dict_512[1,1,0][0.1], alpha = 256))]
-if "--record_1024_ntru" in sys.argv:
-    params += [("G+G NTRU Signature Recommended", FSParameterSet(50177, n=1024, k=1, l=1, eta=1, security = 180, sigma = dict_1024[0.5], alpha = 1024))]
-    #params += [("G+G NTRU Signature Recommended", FSParameterSet(45569, n=1024, k=1, l=1, eta=1, security = 180, sigma = sqrt(2)*368.23, alpha = 2048))]
+if "--512" in sys.argv:
+    params += [("G+G NTRU Signature Medium", FSParameterSet(114689, n=512, k=1, l=1, eta=5, security = 90, sigma1 = 346.95, alpha = 1024, zeta="1+x^{n/2}"))] #Acceptance rate = 0.25
+if "--1024" in sys.argv:
+    #params += [("G+G NTRU Signature Recommended", FSParameterSet(59393, n=1024, k=1, l=1, eta=1, security = 180, sigma1 = 133.79, alpha = 1024))] #Acceptance rate = 0.25
+    params += [("G+G NTRU Signature Recommended", FSParameterSet(86017, n=1024, k=1, l=1, eta=2, security = 180, sigma1 = 228.14, alpha = 1024, zeta="1+x^{n/2}"))] #Acceptance rate = 0.23
 
 
 #########################
@@ -170,11 +137,12 @@ def FS_Entropy(dps):
     """
     Computes the optimal expected size of a signature by replacing the encoding of z by its entropy
     """
-    #Size of tilde{c} is n bits
-    size_c = dps.n 
-    # See p.17 of BLISS-G
-    size_c_h = size_c + (1.8257+dps.delta-log(dps.alpha,2))*dps.n*dps.k
-    return size_c_h+(1.8257+dps.delta)*dps.n*dps.l
+    #Size of tilde{c} is n bits if zeta=2, else n/2
+    if dps.zeta_lattice == "2":
+        size_c = dps.n 
+    else:
+        size_c = dps.n//2
+    return size_c + dps.n*(dps.l*entropy(trunc_gaussian(dps.sigma, dps.B)) + dps.k*entropy(high_bits(dps.sigma, dps.B, dps.alpha)))
 
 def FS_PK_Size(dps):
     """
@@ -226,7 +194,7 @@ for (scheme, param) in params:
         table_entropy[j] = FS_Entropy(param)
         print(table_entropy[j])
         print("=== PK SIZE")
-        table_pk[j] = FS_PK_Size(param)
+        table_pk[j] = FS_PK_Size(param)-256*int("NTRU" in scheme) #No seed in the NTRU scheme
         print(table_pk[j])
     j+=1
 
@@ -234,21 +202,32 @@ for (scheme, param) in params:
 print("FS SIGNATURE TABLE")
 print("========================")
 print("\\hline")
+print("Target Security"+"".join([" & "+str(dps[1].security) for dps in params]))
+print("\\\\")
+print("\\hline")
+print("$n$"+"".join([" & "+str(dps[1].n) for dps in params]))
+print("\\\\")
 print("$q$"+"".join([" & "+str(dps[1].q) for dps in params]))
 print("\\\\")
-print("S"+"".join([" & "+str(dps[1].sigma/(2*sqrt(log(dps[1].n-1+dps[1].n*2**65)/pi))) for dps in params]))
+print("S"+"".join([" & "+str(dps[1].sigma1) for dps in params]))
 print("\\\\")
-print("s"+"".join([" & "+str(2*sqrt(log(dps[1].n-1+dps[1].n*2**65))) for dps in params]))
+print("Keygen Acceptance Rate"+"".join([" &  " for dps in params]))
 print("\\\\")
-print("$\sigma$"+"".join([" & "+str(dps[1].sigma) for dps in params]))
+print("s"+"".join([" & "+str(dps[1].s) for dps in params]))
 print("\\\\")
-print("$B$"+"".join([" & "+str(dps[1].zeta) for dps in params]))
+print("$\\sigma$"+"".join([" & "+str(dps[1].sigma_pi) for dps in params]))
+print("\\\\")
+print("$\\gamma$"+"".join([" & "+str(dps[1].zeta) for dps in params]))
 print("\\\\")
 print("$(m,k-m)$"+"".join([" & ("+str(dps[1].k)+","+str(dps[1].l)+")" for dps in params]))
 print("\\\\")
 print("$\\eta$"+"".join([" & "+str(dps[1].eta) for dps in params]))
 print("\\\\")
 print("$\\alpha$"+"".join([" & "+str(dps[1].alpha) for dps in params]))
+print("\\\\")
+print("$d$"+"".join([" & "+str(dps[1].d) for dps in params]))
+print("\\\\")
+print("$\zeta$"+"".join([" & $"+str(dps[1].zeta_lattice)+str("$") for dps in params]))
 print("\\\\")
 print("\\hline")
 for j in range(3):
